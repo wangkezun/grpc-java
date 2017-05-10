@@ -31,71 +31,41 @@
 
 package io.grpc;
 
-import java.io.InputStream;
-
 /**
- * Definition of a method bound by a {@link io.grpc.HandlerRegistry} and exposed
- * by a {@link Server}.
+ * Definition of a method exposed by a {@link Server}.
+ *
+ * @see ServerServiceDefinition
  */
-public final class ServerMethodDefinition<RequestT, ResponseT> {
-  private final String name;
-  private final Marshaller<RequestT> requestMarshaller;
-  private final Marshaller<ResponseT> responseMarshaller;
-  private final ServerCallHandler<RequestT, ResponseT> handler;
+public final class ServerMethodDefinition<ReqT, RespT> {
+  private final MethodDescriptor<ReqT, RespT> method;
+  private final ServerCallHandler<ReqT, RespT> handler;
 
-  // ServerMethodDefinition has no form of public construction. It is only created within the
-  // context of a ServerServiceDefinition.Builder.
-  ServerMethodDefinition(String name, Marshaller<RequestT> requestMarshaller,
-      Marshaller<ResponseT> responseMarshaller, ServerCallHandler<RequestT, ResponseT> handler) {
-    this.name = name;
-    this.requestMarshaller = requestMarshaller;
-    this.responseMarshaller = responseMarshaller;
+  private ServerMethodDefinition(MethodDescriptor<ReqT, RespT> method,
+      ServerCallHandler<ReqT, RespT> handler) {
+    this.method = method;
     this.handler = handler;
   }
 
   /**
    * Create a new instance.
    *
-   * @param name the simple name of a method.
-   * @param requestMarshaller marshaller for request messages.
-   * @param responseMarshaller marshaller for response messages.
+   * @param method the {@link MethodDescriptor} for this method.
    * @param handler to dispatch calls to.
    * @return a new instance.
    */
-  public static <RequestT, ResponseT> ServerMethodDefinition<RequestT, ResponseT> create(
-      String name, Marshaller<RequestT> requestMarshaller,
-      Marshaller<ResponseT> responseMarshaller, ServerCallHandler<RequestT, ResponseT> handler) {
-    return new ServerMethodDefinition<RequestT, ResponseT>(name, requestMarshaller,
-        responseMarshaller, handler);
+  public static <ReqT, RespT> ServerMethodDefinition<ReqT, RespT> create(
+      MethodDescriptor<ReqT, RespT> method,
+      ServerCallHandler<ReqT, RespT> handler) {
+    return new ServerMethodDefinition<ReqT, RespT>(method, handler);
   }
 
-  /** The simple name of the method. It is not an absolute path. */
-  public String getName() {
-    return name;
-  }
-
-  /**
-   * Parse an incoming request message.
-   *
-   * @param input the serialized message as a byte stream.
-   * @return a parsed instance of the message.
-   */
-  public RequestT parseRequest(InputStream input) {
-    return requestMarshaller.parse(input);
-  }
-
-  /**
-   * Serialize an outgoing response message.
-   *
-   * @param response the response message to serialize.
-   * @return the serialized message as a byte stream.
-   */
-  public InputStream streamResponse(ResponseT response) {
-    return responseMarshaller.stream(response);
+  /** The {@code MethodDescriptor} for this method. */
+  public MethodDescriptor<ReqT, RespT> getMethodDescriptor() {
+    return method;
   }
 
   /** Handler for incoming calls. */
-  public ServerCallHandler<RequestT, ResponseT> getServerCallHandler() {
+  public ServerCallHandler<ReqT, RespT> getServerCallHandler() {
     return handler;
   }
 
@@ -105,9 +75,8 @@ public final class ServerMethodDefinition<RequestT, ResponseT> {
    * @param handler to bind to a cloned instance of this.
    * @return a cloned instance of this with the new handler bound.
    */
-  public ServerMethodDefinition<RequestT, ResponseT> withServerCallHandler(
-      ServerCallHandler<RequestT, ResponseT> handler) {
-    return new ServerMethodDefinition<RequestT, ResponseT>(
-        name, requestMarshaller, responseMarshaller, handler);
+  public ServerMethodDefinition<ReqT, RespT> withServerCallHandler(
+      ServerCallHandler<ReqT, RespT> handler) {
+    return new ServerMethodDefinition<ReqT, RespT>(method, handler);
   }
 }

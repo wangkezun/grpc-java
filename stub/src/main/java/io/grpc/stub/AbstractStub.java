@@ -31,17 +31,18 @@
 
 package io.grpc.stub;
 
-import com.google.common.collect.Maps;
+import static com.google.common.base.Preconditions.checkNotNull;
 
+import io.grpc.CallCredentials;
+import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.ClientInterceptor;
 import io.grpc.ClientInterceptors;
-import io.grpc.MethodDescriptor;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import io.grpc.Deadline;
+import io.grpc.ExperimentalApi;
+import io.grpc.ManagedChannelBuilder;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
 
 /**
  * Common base type for stub implementations.
@@ -49,100 +50,173 @@ import java.util.concurrent.TimeUnit;
  * <p>This is the base class of the stub classes from the generated code. It allows for
  * reconfiguration, e.g., attaching interceptors to the stub.
  *
+ * @since 1.0.0
  * @param <S> the concrete type of this stub.
- * @param <C> the service descriptor type
  */
-public abstract class AbstractStub<S extends AbstractStub<?, ?>,
-    C extends AbstractServiceDescriptor<C>> {
-  protected final Channel channel;
-  protected final C config;
+public abstract class AbstractStub<S extends AbstractStub<S>> {
+  private final Channel channel;
+  private final CallOptions callOptions;
 
   /**
-   * Constructor for use by subclasses.
+   * Constructor for use by subclasses, with the default {@code CallOptions}.
    *
+   * @since 1.0.0
    * @param channel the channel that this stub will use to do communications
-   * @param config defines the RPC methods of the stub
    */
-  protected AbstractStub(Channel channel, C config) {
-    this.channel = channel;
-    this.config = config;
-  }
-
-  protected C getServiceDescriptor() {
-    return config;
+  protected AbstractStub(Channel channel) {
+    this(channel, CallOptions.DEFAULT);
   }
 
   /**
-   * Creates a builder for reconfiguring the stub.
+   * Constructor for use by subclasses, with the default {@code CallOptions}.
+   *
+   * @since 1.0.0
+   * @param channel the channel that this stub will use to do communications
+   * @param callOptions the runtime call options to be applied to every call on this stub
    */
-  public StubConfigBuilder configureNewStub() {
-    return new StubConfigBuilder();
+  protected AbstractStub(Channel channel, CallOptions callOptions) {
+    this.channel = checkNotNull(channel, "channel");
+    this.callOptions = checkNotNull(callOptions, "callOptions");
   }
 
   /**
    * The underlying channel of the stub.
+   *
+   * @since 1.0.0
    */
-  public Channel getChannel() {
+  public final Channel getChannel() {
     return channel;
+  }
+
+  /**
+   * The {@code CallOptions} of the stub.
+   *
+   * @since 1.0.0
+   */
+  public final CallOptions getCallOptions() {
+    return callOptions;
   }
 
   /**
    * Returns a new stub with the given channel for the provided method configurations.
    *
+   * @since 1.0.0
    * @param channel the channel that this stub will use to do communications
-   * @param config defines the RPC methods of the stub
+   * @param callOptions the runtime call options to be applied to every call on this stub
    */
-  protected abstract S build(Channel channel, C config);
+  protected abstract S build(Channel channel, CallOptions callOptions);
 
   /**
-   * Utility class for (re) configuring the operations in a stub.
+   * Returns a new stub with an absolute deadline.
+   *
+   * <p>This is mostly used for propagating an existing deadline. {@link #withDeadlineAfter} is the
+   * recommended way of setting a new deadline,
+   *
+   * @since 1.0.0
+   * @param deadline the deadline or {@code null} for unsetting the deadline.
    */
-  public class StubConfigBuilder {
+  public final S withDeadline(@Nullable Deadline deadline) {
+    return build(channel, callOptions.withDeadline(deadline));
+  }
 
-    private final Map<String, MethodDescriptor<?, ?>> methodMap;
-    private final List<ClientInterceptor> interceptors = new ArrayList<ClientInterceptor>();
-    private Channel stubChannel;
+  /**
+   * Returns a new stub with a deadline that is after the given {@code duration} from now.
+   *
+   * @since 1.0.0
+   * @see CallOptions#withDeadlineAfter
+   */
+  public final S withDeadlineAfter(long duration, TimeUnit unit) {
+    return build(channel, callOptions.withDeadlineAfter(duration, unit));
+  }
 
-    private StubConfigBuilder() {
-      this.stubChannel = AbstractStub.this.channel;
-      methodMap = Maps.newHashMapWithExpectedSize(config.methods().size());
-      for (MethodDescriptor<?, ?> method : AbstractStub.this.config.methods()) {
-        methodMap.put(method.getName(), method);
-      }
-    }
+  /**
+   *  Set's the compressor name to use for the call.  It is the responsibility of the application
+   *  to make sure the server supports decoding the compressor picked by the client.  To be clear,
+   *  this is the compressor used by the stub to compress messages to the server.  To get
+   *  compressed responses from the server, set the appropriate {@link io.grpc.DecompressorRegistry}
+   *  on the {@link io.grpc.ManagedChannelBuilder}.
+   *
+   * @since 1.0.0
+   * @param compressorName the name (e.g. "gzip") of the compressor to use.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1704")
+  public final S withCompression(String compressorName) {
+    return build(channel, callOptions.withCompression(compressorName));
+  }
 
-    /**
-     * Sets a timeout for all methods in the stub.
-     */
-    public StubConfigBuilder setTimeout(long timeout, TimeUnit unit) {
-      for (Map.Entry<String, MethodDescriptor<?, ?>> entry : methodMap.entrySet()) {
-        entry.setValue(entry.getValue().withTimeout(timeout, unit));
-      }
-      return this;
-    }
+  /**
+   * Returns a new stub that uses the given channel.
+   *
+   * <p>This method is vestigial and is unlikely to be useful.  Instead, users should prefer to
+   * use {@link #withInterceptors}.
+   *
+   * @since 1.0.0
+   */
+  @Deprecated // use withInterceptors() instead
+  public final S withChannel(Channel newChannel) {
+    return build(newChannel, callOptions);
+  }
 
-    /**
-     * Set the channel to be used by the stub.
-     */
-    public StubConfigBuilder setChannel(Channel channel) {
-      this.stubChannel = channel;
-      return this;
-    }
+  /**
+   * Sets a custom option to be passed to client interceptors on the channel
+   * {@link io.grpc.ClientInterceptor} via the CallOptions parameter.
+   *
+   * @since 1.0.0
+   * @param key the option being set
+   * @param value the value for the key
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/1869")
+  public final <T> S withOption(CallOptions.Key<T> key, T value) {
+    return build(channel, callOptions.withOption(key, value));
+  }
 
-    /**
-     * Adds a client interceptor to be attached to the channel of the reconfigured stub.
-     */
-    public StubConfigBuilder addInterceptor(ClientInterceptor interceptor) {
-      interceptors.add(interceptor);
-      return this;
-    }
+  /**
+   * Returns a new stub that has the given interceptors attached to the underlying channel.
+   *
+   * @since 1.0.0
+   */
+  public final S withInterceptors(ClientInterceptor... interceptors) {
+    return build(ClientInterceptors.intercept(channel, interceptors), callOptions);
+  }
 
-    /**
-     * Create a new stub with the configurations made on this builder.
-     */
-    public S build() {
-      return AbstractStub.this.build(ClientInterceptors.intercept(stubChannel, interceptors),
-          config.build(methodMap));
-    }
+  /**
+   * Returns a new stub that uses the given call credentials.
+   *
+   * @since 1.0.0
+   */
+  @ExperimentalApi("https//github.com/grpc/grpc-java/issues/1914")
+  public final S withCallCredentials(CallCredentials credentials) {
+    return build(channel, callOptions.withCallCredentials(credentials));
+  }
+
+  /**
+   * Returns a new stub that uses the 'wait for ready' call option.
+   *
+   * @since 1.1.0
+   */
+  public final S withWaitForReady() {
+    return build(channel, callOptions.withWaitForReady());
+  }
+
+  /**
+   * Returns a new stub that limits the maximum acceptable message size from a remote peer.
+   *
+   * <p>If unset, the {@link ManagedChannelBuilder#maxInboundMessageSize(int)} limit is used.
+   *
+   * @since 1.1.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2563")
+  public final S withMaxInboundMessageSize(int maxSize) {
+    return build(channel, callOptions.withMaxInboundMessageSize(maxSize));
+  }
+
+  /**
+   * Returns a new stub that limits the maximum acceptable message size to send a remote peer.
+   *
+   * @since 1.1.0
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2563")
+  public final S withMaxOutboundMessageSize(int maxSize) {
+    return build(channel, callOptions.withMaxOutboundMessageSize(maxSize));
   }
 }

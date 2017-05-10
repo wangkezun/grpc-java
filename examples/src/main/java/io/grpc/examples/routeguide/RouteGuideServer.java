@@ -40,10 +40,9 @@ import static java.lang.Math.sqrt;
 import static java.lang.Math.toRadians;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
-import io.grpc.ServerImpl;
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
-import io.grpc.transport.netty.NettyServerBuilder;
-
 import java.io.IOException;
 import java.net.URL;
 import java.util.ArrayList;
@@ -62,26 +61,27 @@ public class RouteGuideServer {
   private static final Logger logger = Logger.getLogger(RouteGuideServer.class.getName());
 
   private final int port;
-  private final Collection<Feature> features;
-  private ServerImpl gRpcServer;
+  private final Server server;
 
-  public RouteGuideServer(int port) {
+  public RouteGuideServer(int port) throws IOException {
     this(port, RouteGuideUtil.getDefaultFeaturesFile());
   }
 
-  public RouteGuideServer(int port, URL featureFile) {
-    try {
-      this.port = port;
-      features = RouteGuideUtil.parseFeatures(featureFile);
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
+  /** Create a RouteGuide server listening on {@code port} using {@code featureFile} database. */
+  public RouteGuideServer(int port, URL featureFile) throws IOException {
+    this(ServerBuilder.forPort(port), port, RouteGuideUtil.parseFeatures(featureFile));
   }
 
-  public void start() {
-    gRpcServer = NettyServerBuilder.forPort(port)
-        .addService(RouteGuideGrpc.bindService(new RouteGuideService(features)))
-        .build().start();
+  /** Create a RouteGuide server using serverBuilder as a base and features as data. */
+  public RouteGuideServer(ServerBuilder<?> serverBuilder, int port, Collection<Feature> features) {
+    this.port = port;
+    server = serverBuilder.addService(new RouteGuideService(features))
+        .build();
+  }
+
+  /** Start serving requests. */
+  public void start() throws IOException {
+    server.start();
     logger.info("Server started, listening on " + port);
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
@@ -94,23 +94,37 @@ public class RouteGuideServer {
     });
   }
 
+  /** Stop serving requests and shutdown resources. */
   public void stop() {
-    if (gRpcServer != null) {
-      gRpcServer.shutdown();
+    if (server != null) {
+      server.shutdown();
     }
   }
 
+  /**
+   * Await termination on the main thread since the grpc library uses daemon threads.
+   */
+  private void blockUntilShutdown() throws InterruptedException {
+    if (server != null) {
+      server.awaitTermination();
+    }
+  }
+
+  /**
+   * Main method.  This comment makes the linter happy.
+   */
   public static void main(String[] args) throws Exception {
     RouteGuideServer server = new RouteGuideServer(8980);
     server.start();
+    server.blockUntilShutdown();
   }
 
   /**
    * Our implementation of RouteGuide service.
    *
-   * <p> See route_guide.proto for details of the methods.
+   * <p>See route_guide.proto for details of the methods.
    */
-  private static class RouteGuideService implements RouteGuideGrpc.RouteGuide {
+  private static class RouteGuideService extends RouteGuideGrpc.RouteGuideImplBase {
     private final Collection<Feature> features;
     private final ConcurrentMap<Point, List<RouteNote>> routeNotes =
         new ConcurrentHashMap<Point, List<RouteNote>>();
@@ -121,14 +135,14 @@ public class RouteGuideServer {
 
     /**
      * Gets the {@link Feature} at the requested {@link Point}. If no feature at that location
-     * exists, an unnammed feature is returned at the provided location.
+     * exists, an unnamed feature is returned at the provided location.
      *
      * @param request the requested location for the feature.
      * @param responseObserver the observer that will receive the feature at the requested point.
      */
     @Override
     public void getFeature(Point request, StreamObserver<Feature> responseObserver) {
-      responseObserver.onValue(getFeature(request));
+      responseObserver.onNext(checkFeature(request));
       responseObserver.onCompleted();
     }
 
@@ -153,7 +167,7 @@ public class RouteGuideServer {
         int lat = feature.getLocation().getLatitude();
         int lon = feature.getLocation().getLongitude();
         if (lon >= left && lon <= right && lat >= bottom && lat <= top) {
-          responseObserver.onValue(feature);
+          responseObserver.onNext(feature);
         }
       }
       responseObserver.onCompleted();
@@ -173,12 +187,12 @@ public class RouteGuideServer {
         int featureCount;
         int distance;
         Point previous;
-        long startTime = System.nanoTime();
+        final long startTime = System.nanoTime();
 
         @Override
-        public void onValue(Point point) {
+        public void onNext(Point point) {
           pointCount++;
-          if (RouteGuideUtil.exists(getFeature(point))) {
+          if (RouteGuideUtil.exists(checkFeature(point))) {
             featureCount++;
           }
           // For each point after the first, add the incremental distance from the previous point to
@@ -191,13 +205,13 @@ public class RouteGuideServer {
 
         @Override
         public void onError(Throwable t) {
-          logger.log(Level.WARNING, "Encountered error in recordRoute", t);
+          logger.log(Level.WARNING, "recordRoute cancelled");
         }
 
         @Override
         public void onCompleted() {
           long seconds = NANOSECONDS.toSeconds(System.nanoTime() - startTime);
-          responseObserver.onValue(RouteSummary.newBuilder().setPointCount(pointCount)
+          responseObserver.onNext(RouteSummary.newBuilder().setPointCount(pointCount)
               .setFeatureCount(featureCount).setDistance(distance)
               .setElapsedTime((int) seconds).build());
           responseObserver.onCompleted();
@@ -216,12 +230,12 @@ public class RouteGuideServer {
     public StreamObserver<RouteNote> routeChat(final StreamObserver<RouteNote> responseObserver) {
       return new StreamObserver<RouteNote>() {
         @Override
-        public void onValue(RouteNote note) {
+        public void onNext(RouteNote note) {
           List<RouteNote> notes = getOrCreateNotes(note.getLocation());
 
           // Respond with all previous notes at this location.
           for (RouteNote prevNote : notes.toArray(new RouteNote[0])) {
-            responseObserver.onValue(prevNote);
+            responseObserver.onNext(prevNote);
           }
 
           // Now add the new note to the list
@@ -230,7 +244,7 @@ public class RouteGuideServer {
 
         @Override
         public void onError(Throwable t) {
-          logger.log(Level.WARNING, "Encountered error in routeChat", t);
+          logger.log(Level.WARNING, "routeChat cancelled");
         }
 
         @Override
@@ -255,7 +269,7 @@ public class RouteGuideServer {
      * @param location the location to check.
      * @return The feature object at the point. Note that an empty name indicates no feature.
      */
-    private Feature getFeature(Point location) {
+    private Feature checkFeature(Point location) {
       for (Feature feature : features) {
         if (feature.getLocation().getLatitude() == location.getLatitude()
             && feature.getLocation().getLongitude() == location.getLongitude()) {
@@ -275,21 +289,22 @@ public class RouteGuideServer {
      * @param end The end point
      * @return The distance between the points in meters
      */
-    private static double calcDistance(Point start, Point end) {
+    private static int calcDistance(Point start, Point end) {
       double lat1 = RouteGuideUtil.getLatitude(start);
       double lat2 = RouteGuideUtil.getLatitude(end);
       double lon1 = RouteGuideUtil.getLongitude(start);
       double lon2 = RouteGuideUtil.getLongitude(end);
-      int R = 6371000; // metres
-      double φ1 = toRadians(lat1);
-      double φ2 = toRadians(lat2);
-      double Δφ = toRadians(lat2-lat1);
-      double Δλ = toRadians(lon2-lon1);
+      int r = 6371000; // meters
+      double phi1 = toRadians(lat1);
+      double phi2 = toRadians(lat2);
+      double deltaPhi = toRadians(lat2 - lat1);
+      double deltaLambda = toRadians(lon2 - lon1);
 
-      double a = sin(Δφ/2) * sin(Δφ/2) + cos(φ1) * cos(φ2) * sin(Δλ/2) * sin(Δλ/2);
-      double c = 2 * atan2(sqrt(a), sqrt(1-a));
+      double a = sin(deltaPhi / 2) * sin(deltaPhi / 2)
+          + cos(phi1) * cos(phi2) * sin(deltaLambda / 2) * sin(deltaLambda / 2);
+      double c = 2 * atan2(sqrt(a), sqrt(1 - a));
 
-      return R * c;
+      return (int) (r * c);
     }
   }
 }

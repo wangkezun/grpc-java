@@ -1,22 +1,33 @@
+buildscript {
+    repositories {
+        mavenCentral()
+        maven {
+            url "https://plugins.gradle.org/m2/"
+        }
+    }
+    dependencies {
+        classpath libraries.math
+        classpath libraries.protobuf_plugin
+    }
+}
+
+plugins {
+  id "me.champeau.gradle.jmh" version "0.3.0"
+}
+
 apply plugin: 'application'
-apply plugin: 'protobuf'
 
 description = "grpc Benchmarks"
 
 startScripts.enabled = false
 run.enabled = false
 
-buildscript {
-    repositories {
-        mavenCentral()
-    }
-    dependencies {
-        classpath libraries.protobuf_plugin
-    }
-}
-
-configurations {
-    alpnboot
+jmh {
+    jmhVersion = '1.18'
+    warmupIterations = 10
+    iterations = 10
+    fork = 1
+    jvmArgs = "-server -Xms2g -Xmx2g"
 }
 
 dependencies {
@@ -24,49 +35,74 @@ dependencies {
             project(':grpc-netty'),
             project(':grpc-okhttp'),
             project(':grpc-stub'),
-            project(':grpc-integration-testing'),
+            project(':grpc-protobuf'),
+            project(':grpc-testing'),
             libraries.junit,
             libraries.mockito,
-            libraries.hdrhistogram
-
-    alpnboot alpnboot_package_name
+            libraries.hdrhistogram,
+            libraries.netty_tcnative,
+            libraries.netty_epoll,
+            libraries.math
 }
 
+compileJmhJava {
+  options.compilerArgs = compileJava.options.compilerArgs
+}
+
+configureProtoCompilation()
+
+def vmArgs = [
+        "-server",
+        "-Xms2g",
+        "-Xmx2g",
+        "-XX:+PrintGCDetails"
+]
+
 task qps_client(type: CreateStartScripts) {
-    mainClassName = "io.grpc.benchmarks.qps.QpsClient"
+    mainClassName = "io.grpc.benchmarks.qps.AsyncClient"
     applicationName = "qps_client"
-    defaultJvmOpts = ["-Xbootclasspath/p:" + configurations.alpnboot.asPath]
+    defaultJvmOpts = ["-javaagent:" + configurations.alpnagent.asPath] + vmArgs
+    outputDir = new File(project.buildDir, 'tmp')
+    classpath = jar.outputs.files + project.configurations.runtime
+}
+
+task openloop_client(type: CreateStartScripts) {
+    mainClassName = "io.grpc.benchmarks.qps.OpenLoopClient"
+    applicationName = "openloop_client"
+    defaultJvmOpts = ["-javaagent:" + configurations.alpnagent.asPath] + vmArgs
     outputDir = new File(project.buildDir, 'tmp')
     classpath = jar.outputs.files + project.configurations.runtime
 }
 
 task qps_server(type: CreateStartScripts) {
-    mainClassName = "io.grpc.benchmarks.qps.QpsServer"
+    mainClassName = "io.grpc.benchmarks.qps.AsyncServer"
     applicationName = "qps_server"
-    defaultJvmOpts = ["-Xbootclasspath/p:" + configurations.alpnboot.asPath]
+    defaultJvmOpts = ["-javaagent:" + configurations.alpnagent.asPath] + vmArgs
+    outputDir = new File(project.buildDir, 'tmp')
+    classpath = jar.outputs.files + project.configurations.runtime
+}
+
+task benchmark_worker(type: CreateStartScripts) {
+    mainClassName = "io.grpc.benchmarks.driver.LoadWorker"
+    applicationName = "benchmark_worker"
+    defaultJvmOpts = ["-javaagent:" + configurations.alpnagent.asPath] + vmArgs
     outputDir = new File(project.buildDir, 'tmp')
     classpath = jar.outputs.files + project.configurations.runtime
 }
 
 applicationDistribution.into("bin") {
     from(qps_client)
+    from(openloop_client)
     from(qps_server)
+    from(benchmark_worker)
     fileMode = 0755
 }
 
-protobufCodeGenPlugins = ["java_plugin:$javaPluginPath"]
-generateProto.dependsOn ':grpc-compiler:java_pluginExecutable'
-
-// Allow intellij projects to refer to generated-sources
+// Let intellij projects refer to generated code
 idea {
     module {
-        // The whole build dir is excluded by default, but we need build/generated-sources,
-        // which contains the generated proto classes.
-        excludeDirs = [file('.gradle')]
-        if (buildDir.exists()) {
-            excludeDirs += files(buildDir.listFiles())
-            excludeDirs -= file("$buildDir/generated-sources")
-        }
+        sourceDirs += file("${projectDir}/src/generated/main/java");
+        sourceDirs += file("${projectDir}/src/generated/main/grpc");
     }
 }
 

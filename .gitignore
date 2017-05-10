@@ -1,6 +1,11 @@
 # Gradle
 build
+gradle.properties
 .gradle
+local.properties
+
+# Maven (examples)
+target
 
 # IntelliJ IDEA
 .idea
@@ -11,6 +16,11 @@ build
 .project
 .settings
 .gitignore
+bin
 
 # OS X
 .DS_Store
+
+# Emacs
+*~
+\#*\#

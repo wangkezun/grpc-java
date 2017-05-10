@@ -31,11 +31,104 @@
 
 package io.grpc;
 
+import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
- * Server for listening for and dispatching incoming calls. Although Server is an interface, it is
- * not expected to be implemented by application code or interceptors.
+ * Server for listening for and dispatching incoming calls. It is not expected to be implemented by
+ * application code or interceptors.
  */
 @ThreadSafe
-public interface Server {}
+public abstract class Server {
+  /**
+   * Bind and start the server.
+   *
+   * @return {@code this} object
+   * @throws IllegalStateException if already started
+   * @throws IOException if unable to bind
+   */
+  public abstract Server start() throws IOException;
+
+  /**
+   * Returns the port number the server is listening on.  This can return -1 if there is no actual
+   * port or the result otherwise does not make sense.  Result is undefined after the server is
+   * terminated.
+   *
+   * @throws IllegalStateException if the server has not yet been started.
+   */
+  public int getPort() {
+    return -1;
+  }
+
+  /**
+   * Returns all services registered with the server, or an empty list if not supported by the
+   * implementation.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2222")
+  public List<ServerServiceDefinition> getServices() {
+    return Collections.emptyList();
+  }
+
+  /**
+   * Returns immutable services registered with the server, or an empty list if not supported by the
+   * implementation.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2222")
+  public List<ServerServiceDefinition> getImmutableServices() {
+    return Collections.emptyList();
+  }
+
+
+  /**
+   * Returns mutable services registered with the server, or an empty list if not supported by the
+   * implementation.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2222")
+  public List<ServerServiceDefinition> getMutableServices() {
+    return Collections.emptyList();
+  }
+
+  /**
+   * Initiates an orderly shutdown in which preexisting calls continue but new calls are rejected.
+   */
+  public abstract Server shutdown();
+
+  /**
+   * Initiates a forceful shutdown in which preexisting and new calls are rejected. Although
+   * forceful, the shutdown process is still not instantaneous; {@link #isTerminated()} will likely
+   * return {@code false} immediately after this method returns.
+   */
+  public abstract Server shutdownNow();
+
+  /**
+   * Returns whether the server is shutdown. Shutdown servers reject any new calls, but may still
+   * have some calls being processed.
+   *
+   * @see #shutdown()
+   * @see #isTerminated()
+   */
+  public abstract boolean isShutdown();
+
+  /**
+   * Returns whether the server is terminated. Terminated servers have no running calls and
+   * relevant resources released (like TCP connections).
+   *
+   * @see #isShutdown()
+   */
+  public abstract boolean isTerminated();
+
+  /**
+   * Waits for the server to become terminated, giving up if the timeout is reached.
+   *
+   * @return whether the server is terminated, as would be done by {@link #isTerminated()}.
+   */
+  public abstract boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException;
+
+  /**
+   * Waits for the server to become terminated.
+   */
+  public abstract void awaitTermination() throws InterruptedException;
+}

@@ -31,6 +31,8 @@
 
 package io.grpc;
 
+import java.util.Collections;
+import java.util.List;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
@@ -38,36 +40,39 @@ import javax.annotation.concurrent.ThreadSafe;
  * Registry of services and their methods used by servers to dispatching incoming calls.
  */
 @ThreadSafe
+@ExperimentalApi("https://github.com/grpc/grpc-java/issues/933")
 public abstract class HandlerRegistry {
 
   /**
-   * Lookup a {@link Method} by its fully-qualified name. All names are expected to be absolute
-   * paths that start with '/'.
+   * Returns the {@link ServerServiceDefinition}s provided by the registry, or an empty list if not
+   * supported by the implementation.
+   */
+  @ExperimentalApi("https://github.com/grpc/grpc-java/issues/2222")
+  public List<ServerServiceDefinition> getServices() {
+    return Collections.emptyList();
+  }
+
+  /**
+   * Lookup a {@link ServerMethodDefinition} by its fully-qualified name.
    *
-   * @param methodName to lookup {@link Method} for.
+   * @param methodName to lookup {@link ServerMethodDefinition} for.
+   * @param authority the authority for the desired method (to do virtual hosting). If {@code null}
+   *        the first matching method will be returned.
    * @return the resolved method or {@code null} if no method for that name exists.
    */
   @Nullable
-  public abstract Method lookupMethod(String methodName);
+  public abstract ServerMethodDefinition<?, ?> lookupMethod(
+      String methodName, @Nullable String authority);
 
   /**
-   * A method belonging to a service to be exposed to remote callers.
+   * Lookup a {@link ServerMethodDefinition} by its fully-qualified name.
+   *
+   * @param methodName to lookup {@link ServerMethodDefinition} for.
+   * @return the resolved method or {@code null} if no method for that name exists.
    */
-  public static final class Method {
-    private final ServerServiceDefinition serviceDef;
-    private final ServerMethodDefinition<?, ?> methodDef;
-
-    public Method(ServerServiceDefinition serviceDef, ServerMethodDefinition<?, ?> methodDef) {
-      this.serviceDef = serviceDef;
-      this.methodDef = methodDef;
-    }
-
-    public ServerServiceDefinition getServiceDefinition() {
-      return serviceDef;
-    }
-
-    public ServerMethodDefinition<?, ?> getMethodDefinition() {
-      return methodDef;
-    }
+  @Nullable
+  public final ServerMethodDefinition<?, ?> lookupMethod(String methodName) {
+    return lookupMethod(methodName, null);
   }
+
 }

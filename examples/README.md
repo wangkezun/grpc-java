@@ -1,25 +1,70 @@
 grpc Examples
 ==============================================
 
-In order to run the examples simply execute one of the gradle tasks `routeGuideServer`,
-`routeGuideClient`, `helloWorldServer`, or `helloWorldClient`.
+The examples require grpc-java to already be built. You are strongly encouraged
+to check out a git release tag, since there will already be a build of grpc
+available. Otherwise you must follow [COMPILING](../COMPILING.md).
 
-For example, say you want to play around with the route guide examples. First you want to start
-the server and then have the client connect to it and let the good times roll.
+You may want to read through the
+[Quick Start Guide](http://www.grpc.io/docs/quickstart/java.html)
+before trying out the examples.
 
-Assuming you are in the grpc-java root folder you would first start the route guide server
-by running
-
-```
-$ ./gradlew :grpc-examples:routeGuideServer
-```
-
-and in a different terminal window then run the route guide client by typing
+To build the examples, run in this directory:
 
 ```
-$ ./gradlew :grpc-examples:routeGuideClient
+$ ./gradlew installDist
+```
+
+This creates the scripts `hello-world-server`, `hello-world-client`,
+`route-guide-server`, and `route-guide-client` in the
+`build/install/examples/bin/` directory that run the examples. Each
+example requires the server to be running before starting the client.
+
+For example, to try the hello world example first run:
+
+```
+$ ./build/install/examples/bin/hello-world-server
+```
+
+And in a different terminal window run:
+
+```
+$ ./build/install/examples/bin/hello-world-client
 ```
 
 That's it!
 
-Please refer to [Getting Started Guide for Java] (https://github.com/grpc/grpc-common/blob/master/java/javatutorial.md) for more information.
+Please refer to gRPC Java's [README](../README.md) and
+[tutorial](http://www.grpc.io/docs/tutorials/basic/java.html) for more
+information.
+
+## Maven
+
+If you prefer to use Maven:
+```
+$ mvn verify
+$ # Run the server
+$ mvn exec:java -Dexec.mainClass=io.grpc.examples.helloworld.HelloWorldServer
+$ # In another terminal run the client
+$ mvn exec:java -Dexec.mainClass=io.grpc.examples.helloworld.HelloWorldClient
+```
+
+Unit test examples
+==============================================
+
+Examples for unit testing gRPC clients and servers are located in [examples/src/test](src/test).
+
+In general, we DO NOT allow overriding the client stub.
+We encourage users to leverage `InProcessTransport` as demonstrated in the examples to
+write unit tests. `InProcessTransport` is light-weight and runs the server
+and client in the same process without any socket/TCP connection.
+
+For testing a gRPC client, create the client with a real stub
+using an
+[InProcessChannel](../core/src/main/java/io/grpc/inprocess/InProcessChannelBuilder.java),
+and test it against an
+[InProcessServer](../core/src/main/java/io/grpc/inprocess/InProcessServerBuilder.java)
+with a mock/fake service implementation.
+
+For testing a gRPC server, create the server as an InProcessServer,
+and test it against a real client stub with an InProcessChannel.

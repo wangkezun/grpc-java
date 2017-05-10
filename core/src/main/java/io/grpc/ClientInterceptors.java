@@ -32,14 +32,13 @@
 package io.grpc;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
-
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Iterator;
+import java.util.Collections;
 import java.util.List;
 
 /**
- * Utility methods for working with {@link ClientInterceptor}s
+ * Utility methods for working with {@link ClientInterceptor}s.
  */
 public class ClientInterceptors {
 
@@ -48,7 +47,37 @@ public class ClientInterceptors {
 
   /**
    * Create a new {@link Channel} that will call {@code interceptors} before starting a call on the
-   * given channel.
+   * given channel. The first interceptor will have its {@link ClientInterceptor#interceptCall}
+   * called first.
+   *
+   * @param channel the underlying channel to intercept.
+   * @param interceptors array of interceptors to bind to {@code channel}.
+   * @return a new channel instance with the interceptors applied.
+   */
+  public static Channel interceptForward(Channel channel, ClientInterceptor... interceptors) {
+    return interceptForward(channel, Arrays.asList(interceptors));
+  }
+
+  /**
+   * Create a new {@link Channel} that will call {@code interceptors} before starting a call on the
+   * given channel. The first interceptor will have its {@link ClientInterceptor#interceptCall}
+   * called first.
+   *
+   * @param channel the underlying channel to intercept.
+   * @param interceptors a list of interceptors to bind to {@code channel}.
+   * @return a new channel instance with the interceptors applied.
+   */
+  public static Channel interceptForward(Channel channel,
+                                         List<? extends ClientInterceptor> interceptors) {
+    List<? extends ClientInterceptor> copy = new ArrayList<ClientInterceptor>(interceptors);
+    Collections.reverse(copy);
+    return intercept(channel, copy);
+  }
+
+  /**
+   * Create a new {@link Channel} that will call {@code interceptors} before starting a call on the
+   * given channel. The last interceptor will have its {@link ClientInterceptor#interceptCall}
+   * called first.
    *
    * @param channel the underlying channel to intercept.
    * @param interceptors array of interceptors to bind to {@code channel}.
@@ -60,120 +89,118 @@ public class ClientInterceptors {
 
   /**
    * Create a new {@link Channel} that will call {@code interceptors} before starting a call on the
-   * given channel.
+   * given channel. The last interceptor will have its {@link ClientInterceptor#interceptCall}
+   * called first.
    *
    * @param channel the underlying channel to intercept.
    * @param interceptors a list of interceptors to bind to {@code channel}.
    * @return a new channel instance with the interceptors applied.
    */
-  public static Channel intercept(Channel channel, List<ClientInterceptor> interceptors) {
-    Preconditions.checkNotNull(channel);
-    if (interceptors.isEmpty()) {
-      return channel;
+  public static Channel intercept(Channel channel, List<? extends ClientInterceptor> interceptors) {
+    Preconditions.checkNotNull(channel, "channel");
+    for (ClientInterceptor interceptor : interceptors) {
+      channel = new InterceptorChannel(channel, interceptor);
     }
-    return new InterceptorChannel(channel, interceptors);
+    return channel;
   }
 
-  private static class InterceptorChannel implements Channel {
+  private static class InterceptorChannel extends Channel {
     private final Channel channel;
-    private final Iterable<ClientInterceptor> interceptors;
+    private final ClientInterceptor interceptor;
 
-    private InterceptorChannel(Channel channel, List<ClientInterceptor> interceptors) {
+    private InterceptorChannel(Channel channel, ClientInterceptor interceptor) {
       this.channel = channel;
-      this.interceptors = ImmutableList.copyOf(interceptors);
+      this.interceptor = Preconditions.checkNotNull(interceptor, "interceptor");
     }
 
     @Override
-    public <ReqT, RespT> Call<ReqT, RespT> newCall(MethodDescriptor<ReqT, RespT> method) {
-      return new ProcessInterceptorChannel(channel, interceptors).newCall(method);
-    }
-  }
-
-  private static class ProcessInterceptorChannel implements Channel {
-    private final Channel channel;
-    private Iterator<ClientInterceptor> interceptors;
-
-    private ProcessInterceptorChannel(Channel channel, Iterable<ClientInterceptor> interceptors) {
-      this.channel = channel;
-      this.interceptors = interceptors.iterator();
+    public <ReqT, RespT> ClientCall<ReqT, RespT> newCall(
+        MethodDescriptor<ReqT, RespT> method, CallOptions callOptions) {
+      return interceptor.interceptCall(method, callOptions, channel);
     }
 
     @Override
-    public <ReqT, RespT> Call<ReqT, RespT> newCall(MethodDescriptor<ReqT, RespT> method) {
-      if (interceptors != null && interceptors.hasNext()) {
-        return interceptors.next().interceptCall(method, this);
-      } else {
-        Preconditions.checkState(interceptors != null,
-            "The channel has already been called. "
-            + "Some interceptor must have called on \"next\" twice.");
-        interceptors = null;
-        return channel.newCall(method);
+    public String authority() {
+      return channel.authority();
+    }
+  }
+
+  private static final ClientCall<Object, Object> NOOP_CALL = new ClientCall<Object, Object>() {
+    @Override
+    public void start(Listener<Object> responseListener, Metadata headers) {}
+
+    @Override
+    public void request(int numMessages) {}
+
+    @Override
+    public void cancel(String message, Throwable cause) {}
+
+    @Override
+    public void halfClose() {}
+
+    @Override
+    public void sendMessage(Object message) {}
+
+    /**
+     * Always returns {@code false}, since this is only used when the startup of the {@link
+     * ClientCall} fails (i.e. the {@link ClientCall} is closed).
+     */
+    @Override
+    public boolean isReady() {
+      return false;
+    }
+  };
+
+  /**
+   * A {@link io.grpc.ForwardingClientCall} that delivers exceptions from its start logic to the
+   * call listener.
+   *
+   * <p>{@link ClientCall#start(ClientCall.Listener, Metadata)} should not throw any
+   * exception other than those caused by misuse, e.g., {@link IllegalStateException}.  {@code
+   * CheckedForwardingClientCall} provides {@code checkedStart()} in which throwing exceptions is
+   * allowed.
+   */
+  public abstract static class CheckedForwardingClientCall<ReqT, RespT>
+      extends io.grpc.ForwardingClientCall<ReqT, RespT> {
+
+    private ClientCall<ReqT, RespT> delegate;
+
+    /**
+     * Subclasses implement the start logic here that would normally belong to {@code start()}.
+     *
+     * <p>Implementation should call {@code this.delegate().start()} in the normal path. Exceptions
+     * may safely be thrown prior to calling {@code this.delegate().start()}. Such exceptions will
+     * be handled by {@code CheckedForwardingClientCall} and be delivered to {@code
+     * responseListener}.  Exceptions <em>must not</em> be thrown after calling {@code
+     * this.delegate().start()}, as this can result in {@link ClientCall.Listener#onClose} being
+     * called multiple times.
+     */
+    protected abstract void checkedStart(Listener<RespT> responseListener, Metadata headers)
+        throws Exception;
+
+    protected CheckedForwardingClientCall(ClientCall<ReqT, RespT> delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    protected final ClientCall<ReqT, RespT> delegate() {
+      return delegate;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public final void start(Listener<RespT> responseListener, Metadata headers) {
+      try {
+        checkedStart(responseListener, headers);
+      } catch (Exception e) {
+        // Because start() doesn't throw, the caller may still try to call other methods on this
+        // call object. Passing these invocations to the original delegate will cause
+        // IllegalStateException because delegate().start() was not called. We switch the delegate
+        // to a NO-OP one to prevent the IllegalStateException. The user will finally get notified
+        // about the error through the listener.
+        delegate = (ClientCall<ReqT, RespT>) NOOP_CALL;
+        responseListener.onClose(Status.fromThrowable(e), new Metadata());
       }
-    }
-  }
-
-  /**
-   * A {@link Call} which forwards all of it's methods to another {@link Call}.
-   */
-  public static class ForwardingCall<ReqT, RespT> extends Call<ReqT, RespT> {
-
-    private final Call<ReqT, RespT> delegate;
-
-    public ForwardingCall(Call<ReqT, RespT> delegate) {
-      this.delegate = delegate;
-    }
-
-    @Override
-    public void start(Listener<RespT> responseListener, Metadata.Headers headers) {
-      this.delegate.start(responseListener, headers);
-    }
-
-    @Override
-    public void request(int numMessages) {
-      this.delegate.request(numMessages);
-    }
-
-    @Override
-    public void cancel() {
-      this.delegate.cancel();
-    }
-
-    @Override
-    public void halfClose() {
-      this.delegate.halfClose();
-    }
-
-    @Override
-    public void sendPayload(ReqT payload) {
-      this.delegate.sendPayload(payload);
-    }
-  }
-
-  /**
-   * A {@link Call.Listener} which forwards all of its methods to another
-   * {@link Call.Listener}.
-   */
-  public static class ForwardingListener<T> extends Call.Listener<T> {
-
-    private final Call.Listener<T> delegate;
-
-    public ForwardingListener(Call.Listener<T> delegate) {
-      this.delegate = delegate;
-    }
-
-    @Override
-    public void onHeaders(Metadata.Headers headers) {
-      delegate.onHeaders(headers);
-    }
-
-    @Override
-    public void onPayload(T payload) {
-      delegate.onPayload(payload);
-    }
-
-    @Override
-    public void onClose(Status status, Metadata.Trailers trailers) {
-      delegate.onClose(status, trailers);
     }
   }
 }

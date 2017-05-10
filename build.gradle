@@ -1,13 +1,50 @@
-import org.apache.tools.ant.taskdefs.condition.Os
+buildscript {
+  repositories {
+    mavenCentral()
+    mavenLocal()
+    maven {
+      url "https://plugins.gradle.org/m2/"
+    }
+  }
+  dependencies {
+    classpath 'com.google.gradle:osdetector-gradle-plugin:1.4.0'
+    classpath 'ru.vyarus:gradle-animalsniffer-plugin:1.2.0'
+    classpath 'net.ltgt.gradle:gradle-errorprone-plugin:0.0.9'
+  }
+}
 
 subprojects {
+    apply plugin: "checkstyle"
     apply plugin: "java"
     apply plugin: "maven"
     apply plugin: "idea"
     apply plugin: "signing"
+    apply plugin: "jacoco"
+
+    apply plugin: "com.google.osdetector"
+    // The plugin only has an effect if a signature is specified
+    apply plugin: "ru.vyarus.animalsniffer"
+    if (!rootProject.hasProperty('errorProne') || rootProject.errorProne.toBoolean()) {
+      apply plugin: "net.ltgt.errorprone"
+
+      dependencies {
+        // The ErrorProne plugin defaults to the latest, which would break our
+        // build if error prone releases a new version with a new check
+        errorprone 'com.google.errorprone:error_prone_core:2.0.19'
+      }
+    } else {
+      // Remove per-project error-prone checker config
+      allprojects {
+        afterEvaluate { project ->
+          project.tasks.withType(JavaCompile) {
+            options.compilerArgs.removeAll { it.startsWith("-Xep:") }
+          }
+        }
+      }
+    }
 
     group = "io.grpc"
-    version = "0.1.0-SNAPSHOT"
+    version = "1.4.0-SNAPSHOT" // CURRENT_GRPC_VERSION
 
     sourceCompatibility = 1.6
     targetCompatibility = 1.6
@@ -17,58 +54,173 @@ subprojects {
         mavenLocal()
     }
 
-    compileJava {
-        options.compilerArgs << "-Xlint:unchecked"
-        options.encoding = "UTF-8"
+    [compileJava, compileTestJava].each() {
+        it.options.compilerArgs += ["-Xlint:all", "-Xlint:-options", "-Xlint:-path"]
+        it.options.encoding = "UTF-8"
+        if (rootProject.hasProperty('failOnWarnings') && rootProject.failOnWarnings.toBoolean()) {
+            it.options.compilerArgs += ["-Werror"]
+        }
+    }
+
+    compileTestJava {
+      // serialVersionUID is basically guaranteed to be useless in our tests
+      options.compilerArgs += ["-Xlint:-serial"]
+    }
+
+    jar.manifest {
+        attributes('Implementation-Title': name,
+                'Implementation-Version': version,
+                'Built-By': System.getProperty('user.name'),
+                'Built-JDK': System.getProperty('java.version'),
+                'Source-Compatibility': sourceCompatibility,
+                'Target-Compatibility': targetCompatibility)
+    }
+
+    javadoc.options {
+        encoding = 'UTF-8'
+        links 'https://docs.oracle.com/javase/8/docs/api/'
     }
 
     ext {
-        libraries = [
-                guava: 'com.google.guava:guava:18.0',
-                // used to collect benchmark results
-                hdrhistogram: 'org.hdrhistogram:HdrHistogram:2.1.4',
-                hpack: 'com.twitter:hpack:0.10.1',
-                javaee_api: 'javax:javaee-api:7.0',
-                jsonp: 'org.glassfish:javax.json:1.0.4',
-                jsr305: 'com.google.code.findbugs:jsr305:3.0.0',
-                oauth_client: 'com.google.oauth-client:google-oauth-client:1.18.0-rc',
-                okhttp: 'com.squareup.okhttp:okhttp:2.2.0',
-                protobuf: 'com.google.protobuf:protobuf-java:3.0.0-alpha-2',
-                protobuf_nano: 'com.google.protobuf.nano:protobuf-javanano:3.0.0-alpha-2',
-                protobuf_plugin: 'ws.antonov.gradle.plugins:gradle-plugin-protobuf:0.9.1',
+        def exeSuffix = osdetector.os == 'windows' ? ".exe" : ""
+        protocPluginBaseName = 'protoc-gen-grpc-java'
+        javaPluginPath = "$rootDir/compiler/build/exe/java_plugin/$protocPluginBaseName$exeSuffix"
 
-                // TODO: Unreleased dependencies.
-                // These must already be installed in the local maven repository.
-                netty: 'io.netty:netty-codec-http2:5.0.0.Alpha2-SNAPSHOT',
+        guavaVersion = '19.0'
+        protobufVersion = '3.2.0'
+        protobufNanoVersion = '3.0.0-alpha-5'
+
+        configureProtoCompilation = {
+          String generatedSourcePath = "${projectDir}/src/generated"
+          if (rootProject.childProjects.containsKey('grpc-compiler')) {
+            // Only when the codegen is built along with the project, will we be able to recompile
+            // the proto files.
+            project.apply plugin: 'com.google.protobuf'
+            project.protobuf {
+              protoc {
+                if (project.hasProperty('protoc')) {
+                  path = project.protoc
+                } else {
+                  artifact = "com.google.protobuf:protoc:${protobufVersion}"
+                }
+              }
+              plugins {
+                grpc {
+                  path = javaPluginPath
+                }
+              }
+              generateProtoTasks {
+                all().each { task ->
+                  task.dependsOn ':grpc-compiler:java_pluginExecutable'
+                  // Delete the generated sources first, so that we can be alerted if they are not re-compiled.
+                  task.dependsOn 'deleteGeneratedSource' + task.sourceSet.name
+                  // Recompile protos when the codegen has been changed
+                  task.inputs.file javaPluginPath
+                  // Recompile protos when build.gradle has been changed, because
+                  // it's possible the version of protoc has been changed.
+                  task.inputs.file "${rootProject.projectDir}/build.gradle"
+                  task.plugins {
+                    grpc {
+                      // To generate deprecated interfaces and static bindService method,
+                      // turn the enable_deprecated option to true below:
+                      option 'enable_deprecated=false'
+                    }
+                  }
+                }
+              }
+              generatedFilesBaseDir = generatedSourcePath
+            }
+
+            sourceSets.each { sourceSet ->
+              task "deleteGeneratedSource${sourceSet.name}" {
+                doLast {
+                  project.delete project.fileTree(dir: generatedSourcePath + '/' + sourceSet.name)
+                }
+              }
+            }
+          } else {
+            // Otherwise, we just use the checked-in generated code.
+            project.sourceSets {
+              main {
+                java {
+                  srcDir "${generatedSourcePath}/main/java"
+                  srcDir "${generatedSourcePath}/main/javanano"
+                  srcDir "${generatedSourcePath}/main/grpc"
+                }
+              }
+              test {
+                java {
+                  srcDir "${generatedSourcePath}/test/java"
+                  srcDir "${generatedSourcePath}/test/javanano"
+                  srcDir "${generatedSourcePath}/test/grpc"
+                }
+              }
+            }
+          }
+
+          [compileJava, compileTestJava].each() {
+            // Protobuf-generated code produces some warnings.
+            // https://github.com/google/protobuf/issues/2718
+            it.options.compilerArgs += ["-Xlint:-cast", "-Xep:MissingOverride:OFF",
+                "-Xep:ReferenceEquality:OFF", "-Xep:FunctionalInterfaceClash:OFF"]
+          }
+        }
+
+        def epoll_suffix = "";
+        if (osdetector.classifier in ["linux-x86_64"]) {
+            // The native code is only pre-compiled on certain platforms.
+            epoll_suffix = ":" + osdetector.classifier
+        }
+        libraries = [
+                errorprone: "com.google.errorprone:error_prone_annotations:2.0.19",
+                guava: "com.google.guava:guava:${guavaVersion}",
+                hpack: 'com.twitter:hpack:0.10.1',
+                jsr305: 'com.google.code.findbugs:jsr305:3.0.0',
+                oauth_client: 'com.google.auth:google-auth-library-oauth2-http:0.4.0',
+                google_api_protos: 'com.google.api.grpc:proto-google-common-protos:0.1.9',
+                google_auth_credentials: 'com.google.auth:google-auth-library-credentials:0.4.0',
+                okhttp: 'com.squareup.okhttp:okhttp:2.5.0',
+                okio: 'com.squareup.okio:okio:1.6.0',
+                instrumentation_api: 'com.google.instrumentation:instrumentation-api:0.4.2',
+                protobuf: "com.google.protobuf:protobuf-java:${protobufVersion}",
+                // swap to ${protobufVersion} after versions align again
+                protobuf_lite: "com.google.protobuf:protobuf-lite:3.0.1",
+                // swap to ${protobufVersion} after versions align again
+                protoc_lite: "com.google.protobuf:protoc-gen-javalite:3.0.0",
+                protobuf_nano: "com.google.protobuf.nano:protobuf-javanano:${protobufNanoVersion}",
+                protobuf_plugin: 'com.google.protobuf:protobuf-gradle-plugin:0.8.0',
+                protobuf_util: "com.google.protobuf:protobuf-java-util:${protobufVersion}",
+
+                netty: 'io.netty:netty-codec-http2:[4.1.8.Final]',
+                netty_epoll: 'io.netty:netty-transport-native-epoll:4.1.8.Final' + epoll_suffix,
+                netty_proxy_handler: 'io.netty:netty-handler-proxy:4.1.8.Final',
+                netty_tcnative: 'io.netty:netty-tcnative-boringssl-static:1.1.33.Fork26',
 
                 // Test dependencies.
                 junit: 'junit:junit:4.11',
-                mockito: 'org.mockito:mockito-core:1.10.19'
+                mockito: 'org.mockito:mockito-core:1.9.5',
+                truth: 'com.google.truth:truth:0.28',
+
+                // Benchmark dependencies
+                hdrhistogram: 'org.hdrhistogram:HdrHistogram:2.1.8',
+                math: 'org.apache.commons:commons-math3:3.6',
+
+                // Jetty ALPN dependencies
+                jetty_alpn_agent: 'org.mortbay.jetty.alpn:jetty-alpn-agent:2.0.6'
         ]
+    }
 
-        // Determine the correct version of Jetty ALPN boot to use based
-        // on the Java version.
-        def alpnboot_version = '8.1.2.v20141202'
-        if (JavaVersion.current().ordinal() < JavaVersion.VERSION_1_8.ordinal()) {
-            alpnboot_version = '7.1.2.v20141202'
-        }
-
-        alpnboot_package_name = 'org.mortbay.jetty.alpn:alpn-boot:' + alpnboot_version
-
-        def exeSuffix = Os.isFamily(Os.FAMILY_WINDOWS) ? ".exe" : ""
-        // The split is to workaround everything after the colon in C:\ being
-        // removed due to a bug in the protobuf plugin.
-        // https://github.com/aantono/gradle-plugin-protobuf/issues/23
-        def splitRootDir = rootDir
-        if (Os.isFamily(Os.FAMILY_WINDOWS)) {
-          splitRootDir = splitRootDir.getPath().split(":", 2)[1]
-        }
-        javaPluginPath = "$splitRootDir/compiler/build/binaries/java_pluginExecutable/java_plugin$exeSuffix"
+    // Define a separate configuration for managing the dependency on Jetty ALPN agent.
+    configurations {
+        alpnagent
     }
 
     dependencies {
         testCompile libraries.junit,
                     libraries.mockito
+
+        // Configuration for modules that use Jetty ALPN agent
+        alpnagent libraries.jetty_alpn_agent
     }
 
     signing {
@@ -83,6 +235,24 @@ subprojects {
           options.addStringOption('Xdoclint:none', '-quiet')
         }
       }
+    }
+
+    checkstyle {
+        configFile = file("$rootDir/checkstyle.xml")
+        toolVersion = "6.17"
+        ignoreFailures = false
+        if (rootProject.hasProperty("checkstyle.ignoreFailures")) {
+            ignoreFailures = rootProject.properties["checkstyle.ignoreFailures"].toBoolean()
+        }
+        configProperties["rootDir"] = rootDir
+    }
+
+    checkstyleMain {
+        source = fileTree(dir: "src/main", include: "**/*.java")
+    }
+
+    checkstyleTest {
+        source = fileTree(dir: "src/test", include: "**/*.java")
     }
 
     task javadocJar(type: Jar) {
@@ -101,33 +271,35 @@ subprojects {
 
     uploadArchives.repositories.mavenDeployer {
         beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
-
-        repository(url: "https://oss.sonatype.org/service/local/staging/deploy/maven2/") {
-            if (rootProject.hasProperty("ossrhUsername")
-                    && rootProject.hasProperty("ossrhPassword")) {
-                authentication(userName: ossrhUsername, password: ossrhPassword)
-            }
+        String stagingUrl
+        if (rootProject.hasProperty('repositoryId')) {
+          stagingUrl = 'https://oss.sonatype.org/service/local/staging/deployByRepositoryId/' +
+              rootProject.repositoryId
+        } else {
+          stagingUrl = 'https://oss.sonatype.org/service/local/staging/deploy/maven2/'
         }
-
-        snapshotRepository(url: "https://oss.sonatype.org/content/repositories/snapshots/") {
-            if (rootProject.hasProperty("ossrhUsername")
-                    && rootProject.hasProperty("ossrhPassword")) {
-                authentication(userName: ossrhUsername, password: ossrhPassword)
-            }
+        def configureAuth = {
+          if (rootProject.hasProperty('ossrhUsername') && rootProject.hasProperty('ossrhPassword')) {
+            authentication(userName: rootProject.ossrhUsername, password: rootProject.ossrhPassword)
+          }
         }
+        repository(url: stagingUrl, configureAuth)
+        snapshotRepository(url: 'https://oss.sonatype.org/content/repositories/snapshots/', configureAuth)
     }
+    uploadArchives.onlyIf { !name.contains("thrift") }
 
     [
       install.repositories.mavenInstaller,
       uploadArchives.repositories.mavenDeployer,
     ]*.pom*.whenConfigured { pom ->
         pom.project {
+            name "$project.group:$project.name"
             description project.description
             url 'https://github.com/grpc/grpc-java'
 
             scm {
-                connection 'scm:svn:https://github.com/grpc/grpc-java.git'
-                developerConnection 'scm:svn:git@github.com:grpc/grpc-java.git'
+                connection 'scm:git:https://github.com/grpc/grpc-java.git'
+                developerConnection 'scm:git:git@github.com:grpc/grpc-java.git'
                 url 'https://github.com/grpc/grpc-java'
             }
 
@@ -137,6 +309,37 @@ subprojects {
                     url 'http://opensource.org/licenses/BSD-3-Clause'
                 }
             }
+
+            developers {
+                developer {
+                    id "grpc.io"
+                    name "gRPC Contributors"
+                    email "grpc-io@googlegroups.com"
+                    url "http://grpc.io/"
+                    // https://issues.gradle.org/browse/GRADLE-2719
+                    organization = "Google, Inc."
+                    organizationUrl "https://www.google.com"
+                }
+            }
         }
+        if (!(project.name in
+            ["grpc-stub", "grpc-protobuf", "grpc-protobuf-lite", "grpc-protobuf-nano", "grpc-thrift"])) {
+          def core = pom.dependencies.find {dep -> dep.artifactId == 'grpc-core'}
+          if (core != null) {
+            // Depend on specific version of grpc-core because internal package is unstable
+            core.version = "[" + core.version + "]"
+          }
+        }
+    }
+    // At a test failure, log the stack trace to the console so that we don't
+    // have to open the HTML in a browser.
+    test {
+        testLogging {
+            exceptionFormat = 'full'
+            showExceptions true
+            showCauses true
+            showStackTraces true
+        }
+        maxHeapSize = '1500m'
     }
 }
